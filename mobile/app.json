@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "Founder",
+    "slug": "founder",
+    "scheme": "founder",
+    "version": "1.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#12100E",
+    "newArchEnabled": true,
+    "plugins": [
+      "expo-router",
+      "./plugins/preview-cleartext",
+      "expo-secure-store",
+      "@config-plugins/react-native-webrtc",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 180,
+          "backgroundColor": "#12100E"
+        }
+      ]
+    ],
+    "android": {
+      "package": "inc.founder",
+      "versionCode": 3,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0E0D0C"
+      }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "a51fa749-9f12-4cbb-a756-cd655d03a9a0"
+      }
+    },
+    "owner": "founderinc"
+  }
+}
