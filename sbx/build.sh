@@ -3,7 +3,7 @@ set -e
 cd ~ ; source ~/.setup_env 2>/dev/null || true
 export JAVA_HOME=${JAVA_HOME:-$(dirname $(dirname $(readlink -f $(which java))))}
 export ANDROID_HOME=${ANDROID_HOME:-$HOME/android-sdk}; export ANDROID_SDK_ROOT=$ANDROID_HOME
-cd /vercel/fv1-build-tmp && git pull -q
+cd $HOME/fv1-build-tmp && git pull -q
 python3 sbx/decrypt.py tmp-bundle/bundle.json
 source ~/ks/env.sh
 cd mobile
