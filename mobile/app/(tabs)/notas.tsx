@@ -20,8 +20,8 @@ import { colors, MIN_TOUCH, radius, spacing, sz } from "../../src/theme";
 //  · Free: crear, consultar y borrar notas con título y descripción. Sin avisos ni recomendaciones.
 //  · Pro: además fecha y hora del acontecimiento, aviso configurable (minutos, horas o días antes) como
 //    notificación de Android y recomendaciones de Founder generadas a partir de lo que escribió el usuario.
-// El plan se toma de la cuenta (/api/mobile/auth/me). El servidor no impide guardar fechas a una cuenta Free:
-// esa restricción se aplica en la app (la UI no ofrece la opción y no se envían fechas ni avisos).
+// El plan se toma de la cuenta (/api/mobile/auth/me). El servidor también rechaza fechas y avisos de una cuenta Free (403) y la UI no ofrece la opción.
+// Las notas se pueden editar a mano (título y texto); conservan su fecha y su aviso.
 
 const UNITS: Array<{ value: LeadUnit; label: string }> = [
   { value: "minutes", label: "Minutos" },
@@ -37,10 +37,10 @@ const PRESETS: Array<{ label: string; amount: string; unit: LeadUnit }> = [
 const num = (value: string) => (value.trim() === "" ? NaN : Number(value));
 
 function NoteCard({
-  note, pro, steps, busy, onDelete, onRecommend,
+  note, pro, steps, busy, onDelete, onRecommend, onEdit,
 }: {
   note: BusinessNote; pro: boolean; steps: string[]; busy: boolean;
-  onDelete: (note: BusinessNote) => void; onRecommend: (note: BusinessNote) => void;
+  onDelete: (note: BusinessNote) => void; onRecommend: (note: BusinessNote) => void; onEdit: (note: BusinessNote) => void;
 }) {
   const scheduled = note.reminderAt && new Date(note.reminderAt).getTime() > Date.now();
   return (
@@ -58,6 +58,14 @@ function NoteCard({
             {note.content}
           </AppText>
         </View>
+        <Pressable
+          onPress={() => onEdit(note)}
+          accessibilityRole="button"
+          accessibilityLabel={`Editar nota ${note.title}`}
+          style={{ minWidth: MIN_TOUCH, minHeight: MIN_TOUCH, alignItems: "center", justifyContent: "center" }}
+        >
+          <AppText variant="caption">Editar</AppText>
+        </Pressable>
         <Pressable
           onPress={() => onDelete(note)}
           accessibilityRole="button"
@@ -110,6 +118,7 @@ export default function NotesScreen() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; action?: "exact" | "notifications" } | null>(null);
   const [composerOpen, setComposerOpen] = useState(previewOpen);
+  const [editing, setEditing] = useState<BusinessNote | null>(null);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [scheduleOn, setScheduleOn] = useState(previewOpen);
@@ -177,7 +186,42 @@ export default function NotesScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depende solo de la firma de las notas y del plan
   }, [signature, loading]);
 
+  function startEdit(note: BusinessNote) {
+    setEditing(note); setTitle(note.title); setContent(note.content); setScheduleOn(false);
+    setFormError(null); setNotice(null); setComposerOpen(true);
+  }
+
+  function closeComposer() {
+    setEditing(null); setTitle(""); setContent(""); setFormError(null); setComposerOpen(false);
+  }
+
+  /** Guarda los cambios de una nota existente. Conserva su fecha y aviso tal como estaban; solo cambian el título y el texto. */
+  async function saveEdit(note: BusinessNote) {
+    if (saving) return;
+    setFormError(null);
+    if (!title.trim() || !content.trim()) { setFormError("Escribe un título y la descripción de la nota."); return; }
+    setSaving(true);
+    try {
+      await request("/api/business/notes", {
+        method: "PATCH",
+        body: { id: note.id, title: title.trim(), content: content.trim(), noteDate: note.noteDate, timeZone: note.timeZone || "UTC", reminderLeadMinutes: note.reminderLeadMinutes },
+      });
+      const updated: BusinessNote = { ...note, title: title.trim(), content: content.trim() };
+      setNotes((items) => items.map((n) => (n.id === note.id ? updated : n)));
+      // El aviso del teléfono lleva el título: se reprograma con el texto nuevo (misma hora).
+      if (updated.noteDate && updated.reminderAt) scheduleNote(updated, loadSteps(updated.id));
+      closeComposer();
+      setNotice({ text: "Cambios guardados." });
+      await load();
+    } catch (e) {
+      setFormError(`No se guardaron los cambios. ${errorMessage(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function openComposer() {
+    if (composerOpen && editing) { closeComposer(); return; }
     if (!composerOpen && pro && !day) {
       const t = new Date(Date.now() + 24 * 3600 * 1000);
       setDay(String(t.getDate()));
@@ -272,13 +316,18 @@ export default function NotesScreen() {
                 ) : null}
               </View>
             ) : null}
-            <Button title={composerOpen ? "Cerrar nota" : "Nueva nota"} variant={composerOpen ? "secondary" : "primary"} onPress={openComposer} />
+            <Button title={composerOpen ? (editing ? "Cancelar edición" : "Cerrar nota") : "Nueva nota"} variant={composerOpen ? "secondary" : "primary"} onPress={openComposer} />
             {composerOpen ? (
               <View style={styles.composer}>
+                {editing ? <AppText variant="label" color={colors.textMuted} style={{ marginBottom: spacing.sm }}>EDITANDO NOTA</AppText> : null}
                 <Input label="Título" value={title} onChangeText={setTitle} maxLength={160} />
                 <Input label="Descripción" value={content} onChangeText={setContent} multiline maxLength={5000} />
 
-                {pro ? (
+                {editing ? (
+                  <AppText variant="caption" color={colors.textMuted} style={{ marginBottom: spacing.md }}>
+                    {editing.noteDate ? `Esta nota conserva su fecha y su aviso (${formatWhen(new Date(editing.noteDate))}).` : "Esta nota no tiene fecha ni aviso."}
+                  </AppText>
+                ) : pro ? (
                   <View>
                     <View style={styles.switchRow}>
                       <View style={{ flex: 1 }}>
@@ -326,7 +375,7 @@ export default function NotesScreen() {
                 )}
 
                 {formError ? <AppText variant="small" color={colors.danger} accessibilityLiveRegion="polite" style={{ marginBottom: spacing.md }}>{formError}</AppText> : null}
-                <Button title="Guardar nota" onPress={() => void save()} loading={saving} />
+                <Button title={editing ? "Guardar cambios" : "Guardar nota"} onPress={() => void (editing ? saveEdit(editing) : save())} loading={saving} />
               </View>
             ) : null}
             <AppText variant="heading" style={{ marginTop: spacing.xxl, marginBottom: spacing.sm }}>Tus notas</AppText>
@@ -335,7 +384,7 @@ export default function NotesScreen() {
         ListEmptyComponent={!loading ? <AppText variant="small" color={colors.textMuted} style={{ paddingVertical: spacing.xl }}>Todavía no tienes notas guardadas.</AppText> : null}
         renderItem={({ item, index }) => (
           <View>
-            <NoteCard note={item} pro={pro} steps={loadSteps(item.id)} busy={busyId === item.id} onDelete={remove} onRecommend={(n) => void recommend(n)} />
+            <NoteCard note={item} pro={pro} steps={loadSteps(item.id)} busy={busyId === item.id} onDelete={remove} onRecommend={(n) => void recommend(n)} onEdit={startEdit} />
             {index < notes.length - 1 ? <Divider /> : null}
           </View>
         )}

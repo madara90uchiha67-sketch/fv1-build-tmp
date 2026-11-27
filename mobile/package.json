@@ -8,7 +8,7 @@
     "android": "expo start --android",
     "typecheck": "tsc --noEmit",
     "exportar": "expo export --platform android",
-    "test": "node --test tests/realtime-events.test.ts tests/notes-logic.test.ts tests/voice-assistant.test.ts"
+    "test": "node --test tests/realtime-events.test.ts tests/notes-logic.test.ts tests/voice-assistant.test.ts tests/voice-v2.test.ts"
   },
   "dependencies": {
     "@config-plugins/react-native-webrtc": "^15.0.2",

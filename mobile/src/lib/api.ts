@@ -9,6 +9,8 @@ export class ApiError extends Error {
   kind: ApiErrorKind;
   status: number;
   limitReached: boolean;
+  /** Solo para «network»: «timeout» = el servidor no respondió a tiempo; «offline» = no hubo conexión. */
+  reason?: "timeout" | "offline";
   constructor(message: string, kind: ApiErrorKind, status = 0, limitReached = false) {
     super(message);
     this.name = "ApiError";
@@ -53,8 +55,8 @@ async function fetchWithTimeout(
     return await impl(url, { ...init, signal: controller.signal });
   } catch {
     if (external?.aborted) throw new ApiError("Solicitud cancelada.", "aborted");
-    if (timedOut) throw new ApiError("El servidor tardó demasiado en responder. Revisa tu conexión e inténtalo de nuevo.", "network");
-    throw new ApiError("No hay conexión con el servidor. Revisa tu internet e inténtalo de nuevo.", "network");
+    if (timedOut) throw Object.assign(new ApiError("El servidor tardó más de lo normal en responder. Inténtalo de nuevo en un momento.", "network"), { reason: "timeout" as const });
+    throw Object.assign(new ApiError("No hay conexión con el servidor. Revisa tu internet e inténtalo de nuevo.", "network"), { reason: "offline" as const });
   } finally {
     clearTimeout(timer);
     external?.removeEventListener("abort", onAbort);
@@ -200,12 +202,14 @@ export async function streamChat(params: {
   onEvent: (event: ChatEvent) => void;
   /** Cliente HTTP alternativo (por defecto expo/fetch, que lee el flujo; el fetch normal entrega la respuesta completa). */
   impl?: typeof fetch;
+  /** «voice»: respuestas breves y límites de seguridad de voz aplicados también en el servidor. */
+  channel?: "voice";
 }): Promise<void> {
   const res = await authedFetch(
     "/api/chat",
     {
       method: "POST",
-      body: JSON.stringify({ content: params.content, mode: "free", conversationId: params.conversationId ?? undefined }),
+      body: JSON.stringify({ content: params.content, mode: "free", conversationId: params.conversationId ?? undefined, ...(params.channel ? { channel: params.channel } : {}) }),
       headers: { Accept: "text/event-stream" },
       signal: params.signal,
     },

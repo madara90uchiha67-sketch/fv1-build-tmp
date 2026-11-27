@@ -9,3 +9,8 @@ web-build/
 .env
 .env.local
 expo-env.d.ts
+
+# Voz neuronal: se descarga con ci/fetch-neural-voice.sh (no se guarda en git)
+/modules/founder-speech/android/libs/
+/modules/founder-speech/android/src/main/jniLibs/
+/modules/founder-speech/android/src/main/assets/

@@ -3,10 +3,10 @@
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://yamaai.vercel.app").replace(/\/+$/, "");
 
 // Contacto que ya usa la app web (biblioteca/creador.ts). Confírmalo antes de publicar en tienda.
-export const SUPPORT_EMAIL = "soporte@example.com";
+export const SUPPORT_EMAIL = process.env.EXPO_PUBLIC_SUPPORT_EMAIL || "soporte@example.com";
 
 // WhatsApp de feedback que ya usa «Enviar feedback» en Founder Web.
-export const FEEDBACK_URL = "https://wa.me/570000000000?text=Hola%2C%20quiero%20reportar%20algo%20sobre%20Founder%3A%20";
+export const FEEDBACK_URL = process.env.EXPO_PUBLIC_FEEDBACK_URL || "https://wa.me/570000000000?text=Hola%2C%20quiero%20reportar%20algo%20sobre%20Founder%3A%20";
 
 export const LEGAL_LINKS = {
   terminos: `${API_URL}/legal/terminos`,
@@ -22,3 +22,6 @@ export const UI_PREVIEW = process.env.EXPO_PUBLIC_UI_PREVIEW === "1";
 // Solo CI (compilación preview): dirección de un servidor de prueba que imita a OpenAI Realtime por WebRTC,
 // para comprobar en un emulador que el audio viaja de verdad. Sin esta variable la llamada usa siempre OpenAI.
 export const VOICE_TEST_BASE = UI_PREVIEW ? (process.env.EXPO_PUBLIC_VOICE_TEST_BASE || "") : "";
+
+/** Creador de Founder: dato real del proyecto (el mismo que ya usa el asistente del servidor). La voz solo lo dice si está configurado. */
+export const FOUNDER_CREATOR = process.env.EXPO_PUBLIC_FOUNDER_CREATOR || "";

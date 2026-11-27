@@ -13,3 +13,8 @@ android {
     versionName '0.1.0'
   }
 }
+
+dependencies {
+  // Motor de voz neuronal sin conexión (sherpa-onnx). Lo deja en libs/ y jniLibs/ ci/fetch-neural-voice.sh antes de compilar.
+  implementation files('libs/sherpa-classes.jar')
+}

@@ -3,12 +3,13 @@ import { Linking, PermissionsAndroid, Platform } from "react-native";
 import { resetAudioRoute, setKeepScreenOn } from "../../modules/founder-audio";
 import { storeGet, storeSet } from "../../modules/founder-reminders";
 import { onSpeech, speech, speechAvailable } from "../../modules/founder-speech";
-import { ApiError, errorMessage, request, streamChat } from "./api";
+import { ApiError, request, streamChat } from "./api";
+import { FOUNDER_CREATOR } from "./config";
 import { isPro, pendingRecommendations } from "./notes-logic";
 import { ensureNotificationPermission, loadRecommendations, scheduleNote } from "./reminders";
 import { useSession } from "./session";
 import {
-  cancelPending, confirmDeleteByButton, echoRatio, handleUtterance, newSession, parseControl, parseVoiceSwitch, pitchFor, rankVoices, sttConfigKey, sttLadder,
+  NEURAL_VOICE, cancelPending, confirmDeleteByButton, echoRatio, failureSpeech, handleUtterance, newSession, parseControl, parseVoiceSwitch, pitchFor, rankVoices, sttConfigKey, sttLadder, takeFirstSentence,
   type Api, type Deps, type Reply, type SttConfig, type VoiceInfo,
 } from "./voice-assistant";
 import type { BusinessNote } from "./types";
@@ -22,7 +23,7 @@ import type { VoiceError, VoiceLevels } from "./useRealtimeVoice";
 export type TurnPhase = "idle" | "listening" | "user_speaking" | "thinking" | "speaking" | "error";
 
 const RATE = 0.95; // ritmo tranquilo y seguro
-const VOICE_KEY = "voice:male"; // voz elegida (clave nueva: la anterior era una voz femenina con el tono bajado)
+const VOICE_KEY = "voice:male:v2"; // voz elegida (clave nueva: la anterior era una voz femenina con el tono bajado)
 const CFG_KEY = "stt:cfg"; // última configuración de reconocimiento que funcionó en este teléfono
 /** Escuchar mientras Founder habla (para poder interrumpirlo). Si el eco del altavoz molestara, ponerlo en false. */
 const BARGE_IN = true;
@@ -34,27 +35,35 @@ const apiClient: Api = {
   del: <T,>(path: string, body: unknown) => request<T>(path, { method: "DELETE", body }),
 };
 
-async function askChat(text: string, conversationId: string | null): Promise<{ text: string; conversationId: string | null }> {
+const VOICE_BREVITY = "Responde en español, de forma breve y natural (máximo tres frases), sin listas ni formato, porque se va a leer en voz alta.";
+
+async function askChat(text: string, conversationId: string | null, onFirstSentence?: (s: string) => void): Promise<{ text: string; conversationId: string | null }> {
   const run = async (impl?: typeof fetch) => {
-    const acc = { answer: "", id: conversationId, failure: null as string | null };
+    const acc = { answer: "", id: conversationId, failure: null as string | null, first: false };
     await streamChat({
-      content: text,
+      content: `${text}\n\n(${VOICE_BREVITY})`,
       conversationId,
       impl,
+      channel: "voice",
       onEvent: (e) => {
         if (e.type === "meta") acc.id = e.conversationId;
-        else if (e.type === "delta") acc.answer += e.text;
-        else if (e.type === "error") acc.failure = e.message;
+        else if (e.type === "delta") {
+          acc.answer += e.text;
+          if (!acc.first && onFirstSentence) {
+            const s = takeFirstSentence(acc.answer);
+            if (s) { acc.first = true; onFirstSentence(s); }
+          }
+        } else if (e.type === "error") acc.failure = e.message;
       },
     });
-    if (!acc.answer && acc.failure) throw new Error(acc.failure);
+    if (!acc.answer && acc.failure) throw new ApiError(acc.failure, "server");
     return { text: acc.answer, conversationId: acc.id };
   };
   try {
     return await run();
   } catch (e) {
     // Si el canal de flujo falla por red, se reintenta una vez con el cliente normal (respuesta completa).
-    if (e instanceof ApiError && e.kind === "network") return run(fetch);
+    if (e instanceof ApiError && e.kind === "network" && e.reason !== "timeout") return run(fetch);
     throw e;
   }
 }
@@ -103,6 +112,10 @@ export function useTurnVoice() {
     let lastSpeech = "";
     let seq = 0;
     let curSpeakId = "";
+    // Respuesta rápida: se habla la primera frase mientras llega el resto.
+    let early = "";
+    let earlyPlaying = false;
+    let queuedTail = "";
     let lineN = 0;
     let voices: VoiceInfo[] = [];
     let voiceIdx = -1;
@@ -129,6 +142,12 @@ export function useTurnVoice() {
       now: () => new Date(),
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
       chat: askChat,
+      identity: { creator: FOUNDER_CREATOR },
+      onFirstSentence: (sentence) => {
+        if (!alive || ph !== "thinking") return;
+        early = sentence; earlyPlaying = true; queuedTail = "";
+        speakText(sentence);
+      },
       scheduleAlarm: async (n) => {
         try {
           const perm = await ensureNotificationPermission();
@@ -211,7 +230,9 @@ export function useTurnVoice() {
       vlog(`voz: ${v.name} (${v.tag}, género probable: ${v.gender}, red: ${v.network}) tono ${curPitch}`);
     };
     const setupVoices = (entries: string[]) => {
-      if (voices.length) return;
+      const hasNeural = voices.some((v) => v.name === NEURAL_VOICE);
+      // La voz masculina local puede terminar de cargarse después de las voces de Android: entonces pasa a ser la principal.
+      if (voices.length && (hasNeural || !entries.some((e) => e.startsWith(`${NEURAL_VOICE}|`)))) return;
       voices = rankVoices(entries);
       if (voices.length === 0) return;
       const saved = storeGet(VOICE_KEY);
@@ -244,12 +265,23 @@ export function useTurnVoice() {
       if (showText) addLine("assistant", reply.display ?? reply.speech);
       if (alive) setPendingDelete(reply.confirmDelete ?? null);
       lastSpeech = reply.speech;
+      if (earlyPlaying && early && reply.action === "chat" && reply.speech.startsWith(early)) {
+        const tail = reply.speech.slice(early.length).trim();
+        earlyPlaying = false;
+        if (!tail) { early = ""; if (curSpeakId === "") { setP("listening"); later(listen, 350); } return; }
+        if (curSpeakId) { queuedTail = tail; early = ""; return; } // la primera frase aún suena: el resto va al terminar
+        early = "";
+        speakText(tail);
+        return;
+      }
+      if (earlyPlaying) { curSpeakId = ""; speech.stopSpeaking(); }
+      earlyPlaying = false; early = ""; queuedTail = "";
       speakText(reply.speech);
     };
 
     /** Corta la voz de Founder y vuelve a escuchar (interrupción por voz o por toque). */
     const interrupt = () => {
-      curSpeakId = "";
+      curSpeakId = ""; earlyPlaying = false; early = ""; queuedTail = "";
       speech.stopSpeaking();
       speech.cancelListening();
       setLevels((l) => ({ ...l, out: 0 }));
@@ -265,7 +297,7 @@ export function useTurnVoice() {
       try {
         reply = await handleUtterance(deps(), session, text);
       } catch (e) {
-        reply = { speech: `Ocurrió un error. ${errorMessage(e)}`, listenAgain: false };
+        reply = { speech: failureSpeech(e, "No pude completar eso.", false), listenAgain: false };
       }
       vlog(`tiempos: reconocer→orden ${t0 - heardAt} ms · procesar ${Date.now() - t0} ms · acción ${reply.action ?? "?"}`);
       if (alive) say(reply);
@@ -343,6 +375,8 @@ export function useTurnVoice() {
       onSpeech("onSpeakDone", ({ id }) => {
         if (id !== curSpeakId || ph !== "speaking") return;
         curSpeakId = "";
+        if (queuedTail) { const t = queuedTail; queuedTail = ""; speakText(t); return; }
+        if (earlyPlaying) return; // primera frase terminada; la respuesta completa aún está llegando
         speech.cancelListening();
         setLevels((l) => ({ ...l, out: 0 }));
         setP("listening");

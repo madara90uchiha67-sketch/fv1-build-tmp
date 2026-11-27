@@ -32,6 +32,7 @@ type FounderSpeechNative = {
   stopSpeaking(): boolean;
   getSpanishVoices(): string[];
   warmUp(): boolean;
+  neuralStatus(): string;
   getVoice(): string | null;
   setVoice(name: string): boolean;
   addListener<K extends keyof SpeechEvents>(event: K, listener: (payload: SpeechEvents[K]) => void): Subscription;
@@ -60,6 +61,8 @@ export const speech = {
   speak: (text: string, id: string, pitch: number, rate: number) => safe(() => native?.speak(text, id, pitch, rate) ?? false, false),
   stopSpeaking: () => safe(() => native?.stopSpeaking() ?? false, false),
   warmUp: () => safe(() => native?.warmUp() ?? false, false),
+  /** Estado de la voz masculina local: ready | preparing | failed | idle. */
+  neuralStatus: () => safe(() => native?.neuralStatus() ?? "idle", "idle"),
   getSpanishVoices: () => safe(() => native?.getSpanishVoices() ?? [], [] as string[]),
   getVoice: () => safe(() => native?.getVoice() ?? null, null as string | null),
   setVoice: (name: string) => safe(() => native?.setVoice(name) ?? false, false),

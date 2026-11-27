@@ -19,7 +19,11 @@ export interface Deps {
   api: Api;
   now: () => Date;
   /** Respuesta del chat de Founder para una frase libre (texto completo). */
-  chat: (text: string, conversationId: string | null) => Promise<{ text: string; conversationId: string | null }>;
+  chat: (text: string, conversationId: string | null, onFirstSentence?: (sentence: string) => void) => Promise<{ text: string; conversationId: string | null }>;
+  /** Datos de identidad REALES y configurados del proyecto (nada se inventa: si falta un dato, Founder dice que no lo tiene). */
+  identity?: { creator: string | null };
+  /** Se llama con la primera frase de la respuesta del chat en cuanto llega (para empezar a hablar antes). */
+  onFirstSentence?: (sentence: string) => void;
   /** Recomendaciones de Founder Pro que siguen pendientes (guardadas en el teléfono). */
   recommendations: () => { pro: boolean; items: { title: string; whenText: string }[] };
   timeZone: string;
@@ -30,7 +34,7 @@ export interface Deps {
 export type Pending =
   | { type: "sale"; amount: number; currency: string; description: string }
   | { type: "sale_amount"; description: string }
-  | { type: "note_topic" }
+  | { type: "note_flow"; stage: NoteStage; topic: string; detail: string; event: EventInfo | null; when: Pick<WhenParts, "rel" | "day" | "time">; tries: number }
   | { type: "reminder"; title: string | null; when: Pick<WhenParts, "rel" | "day" | "time"> }
   | { type: "delete_note"; id: string; title: string };
 
@@ -172,7 +176,7 @@ export function formatAmount(n: number): string {
 // ---------- Órdenes ----------
 
 export type Command =
-  | { kind: "create_note"; title: string; content: string }
+  | { kind: "create_note"; topic: string; title: string; content: string }
   | { kind: "create_note_topic_missing" }
   | { kind: "register_sale"; amount: number | null; currency: string; description: string }
   | { kind: "list_pending"; scope: "notes" | "recommendations" | "both" }
@@ -257,17 +261,18 @@ export function parseCommand(raw: string, now: Date = new Date()): Command {
   return { kind: "chat", text };
 }
 
-export function noteFromTopic(topic: string): { kind: "create_note"; title: string; content: string } {
+export function noteFromTopic(topic: string): { kind: "create_note"; topic: string; title: string; content: string } {
   const clean = topic.replace(/\s+/g, " ").trim();
   const title = capitalize(clean).slice(0, 80).replace(/[\s,;:]+$/, "");
   const content = `${capitalize(clean)}.`.replace(/\.+$/, ".").slice(0, 4800);
-  return { kind: "create_note", title, content };
+  return { kind: "create_note", topic: clean, title, content };
 }
 
 export function parseYesNo(raw: string): "yes" | "no" | null {
   const f = fold(raw);
   const w = words(f);
   if (w.length === 0) return null;
+  if (/\bno\s+(?:se|estoy\s+seguro|estoy\s+segura|lo\s+se|sabria)\b/.test(f)) return null;
   if (/^(no|cancela|cancelar|negativo|detente|para|mejor no|nunca)\b/.test(f.trim()) || /\b(no lo hagas|no lo registres|no registres|cancela)\b/.test(f)) return "no";
   if (w.some((x) => ["si", "claro", "confirmo", "confirmar", "correcto", "dale", "adelante", "ok", "okey", "listo", "afirmativo", "exacto", "hazlo", "registrala", "registralo", "guardala", "guardalo", "perfecto", "eso"].includes(x)) || /\bde acuerdo\b/.test(f)) return "yes";
   if (w.includes("no")) return "no";
@@ -474,9 +479,13 @@ const latamRank = (tag: string) => {
 };
 
 /** Orden de preferencia: hombre (sin red) > hombre (con red) > género desconocido > mujer; dentro de cada grupo, español latino y mayor calidad. */
+/** Nombre de la voz masculina neuronal incluida en la app (gratuita, sin conexión). Siempre va primero si está disponible. */
+export const NEURAL_VOICE = "founder-voz-masculina";
+
 export function rankVoices(entries: string[]): VoiceInfo[] {
   const g = { male: 0, unknown: 2, female: 4 } as const;
   return entries.map(parseVoiceEntry).sort((a, b) =>
+    Number(b.name === NEURAL_VOICE) - Number(a.name === NEURAL_VOICE) ||
     (g[a.gender] + (a.network ? 1 : 0)) - (g[b.gender] + (b.network ? 1 : 0)) ||
     latamRank(a.tag) - latamRank(b.tag) || b.quality - a.quality || a.name.localeCompare(b.name));
 }
@@ -531,7 +540,116 @@ function whenText(iso: string, now: Date): string {
 
 const quote = (t: string) => `«${t.replace(/\s+/g, " ").trim().slice(0, 70)}»`;
 const listWords = (items: string[]) => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} y ${items[items.length - 1]}`);
-const errText = (e: unknown) => (e instanceof Error && e.message ? e.message : "error desconocido");
+
+// ---------- Errores: se dice lo que pasó de verdad; la conexión solo se menciona cuando la petición falló por red ----------
+
+type ErrLike = { kind?: string; status?: number; reason?: string; message?: string };
+const CHECK_NOTES = "No pude confirmar si se guardó: revisa la sección Notas antes de repetirlo.";
+
+/** Mensaje hablado para un fallo real. `what` = qué se intentaba («No pude guardar la nota.»); `write` = la acción modifica datos. */
+export function failureSpeech(e: unknown, what: string, write = false): string {
+  const x = (e && typeof e === "object" ? e : {}) as ErrLike;
+  const msg = typeof x.message === "string" ? x.message.trim() : "";
+  switch (x.kind) {
+    case "network":
+      return x.reason === "timeout"
+        ? `${what} El servidor tardó más de lo normal en responder; puede ser lentitud pasajera. ${write ? CHECK_NOTES : "Inténtalo de nuevo en un momento."}`
+        : `${what} No pude comunicarme con el servidor de Founder; revisa tu conexión a internet. ${write ? CHECK_NOTES : "Cuando vuelva, inténtalo otra vez."}`;
+    case "server":
+      return `${what} El servidor de Founder tuvo un problema por su lado; no parece ser tu conexión. ${write ? CHECK_NOTES : "Inténtalo de nuevo en unos minutos."}`;
+    case "auth":
+      return "Tu sesión de Founder venció. Cierra sesión y vuelve a entrar para continuar.";
+    case "limit":
+      return "Llegaste al límite de uso de tu plan por ahora. Puedes seguir más tarde o revisar tu plan en la aplicación.";
+    case "aborted":
+      return "Se canceló la solicitud.";
+    case "client":
+      return msg ? `${what} ${msg}` : `${what} Founder no aceptó la solicitud. Revisa los datos e inténtalo de nuevo.`;
+    default:
+      return `${what} Algo falló por mi lado y no sé exactamente qué. ${write ? "No lo doy por guardado: revisa la sección Notas." : "Inténtalo de nuevo."}`;
+  }
+}
+
+/** Error que lanzan las herramientas de voz cuando algo no está permitido. No es un fallo de red ni del servidor. */
+export class VoiceBlockedError extends Error {
+  kind = "blocked";
+  constructor(message = "Esa acción no está permitida por voz.") { super(message); }
+}
+
+// ---------- Seguridad: la voz solo puede usar un conjunto fijo de herramientas, con campos fijos ----------
+
+const NOTE_KEYS = ["title", "content", "noteDate", "timeZone", "reminderLeadMinutes"];
+const SALE_KEYS = ["description", "amount", "currency", "status", "soldAt"];
+const onlyKeys = (body: unknown, allowed: string[]): boolean =>
+  !!body && typeof body === "object" && !Array.isArray(body) && Object.keys(body as object).every((k) => allowed.includes(k));
+
+/**
+ * Cliente de API que se le entrega al asistente de voz. Aunque el texto hablado (o un modelo) intentara otra cosa, SOLO pasan estas
+ * operaciones: leer/crear notas y ventas, pedir el análisis y (únicamente tras pulsar el botón) borrar una nota. Nada de planes, roles,
+ * cuentas, suscripciones, base de datos ni configuración; los campos extra (p. ej. «plan», «role») se rechazan.
+ */
+export function restrictApi(api: Api, o: { allowDelete?: boolean } = {}): Api {
+  const deny = <T>(): Promise<T> => Promise.reject(new VoiceBlockedError());
+  return {
+    get: (path) => (path === "/api/business/notes" || path === "/api/business/sales" ? api.get(path) : deny()),
+    post: (path, body, timeoutMs) => {
+      if (path === "/api/business/notes" && onlyKeys(body, NOTE_KEYS)) return api.post(path, body, timeoutMs);
+      if (path === "/api/business/sales" && onlyKeys(body, SALE_KEYS)) return api.post(path, body, timeoutMs);
+      if (path === "/api/business/insights" && onlyKeys(body, [])) return api.post(path, body, timeoutMs);
+      return deny();
+    },
+    del: (path, body) => (o.allowDelete && path === "/api/business/notes" && onlyKeys(body, ["id"]) ? api.del(path, body) : deny()),
+  };
+}
+
+const guarded = (deps: Deps, allowDelete = false): Deps => ({ ...deps, api: restrictApi(deps.api, { allowDelete }) });
+
+export type RestrictedKind = "secrets" | "admin" | "privilege" | "pro_unlock" | "jailbreak";
+
+const SECRET_NOUN = /\b(api\s*keys?|apikeys?|claves?\s+(?:de\s+)?(?:la\s+)?api|llaves?\s+(?:de\s+)?(?:la\s+)?api|tokens?|secretos?|credenciales?|variables?\s+de\s+entorno|service\s*role|jwt|bearer|archivo\s+env|clave\s+(?:secreta|privada|maestra)|llave\s+(?:secreta|privada)|contrasena\s+maestra|(?:contrasenas?|claves?)\s+(?:de|del)\s+(?:la\s+|el\s+)?(?:base|servidor|admin|administrador|sistema|supabase|vercel|github|gemini|openai|otros|otras|usuarios)|(?:dime|dame|muestra|muestrame|revela|revelame|comparte|leeme|cual\s+es)\w*\s+(?:mi|la|tu)\s+(?:contrasena|password)|(?:cambia|cambiar|modifica|restablece|resetea|actualiza)\w*\s+(?:mi|la|tu)?\s*(?:contrasena|password))\b/;
+const SQL_RE = /\b(?:select|insert|update|delete|drop|truncate|alter|create)\s+(?:\*|\w+\s+)?(?:from|into|table|database|schema|policy|index|role)\b|\bselect\s+\*|\bsql\b|\bquery\b/;
+const DB_NOUN = /\b(base\s+de\s+datos|bases\s+de\s+datos|tablas?|esquemas?|schemas?|politicas?\s+(?:de\s+)?(?:rls|seguridad|acceso)|rls|row\s+level|migracion(?:es)?|prisma|supabase|postgres(?:ql)?|vercel|backend|servidor|endpoints?|api|configuracion(?:es)?\s+(?:interna|del\s+sistema|del\s+servidor))\b/;
+const DB_ACTION = /\b(modifica|modificar|cambia|cambiar|edita|editar|borra|borrar|elimina|eliminar|crea|crear|altera|alterar|actualiza|actualizar|ejecuta|ejecutar|desactiva|desactivar|accede|acceder|conecta|conectate|hackea|hackear|exporta|exportar|vuelca|despliega|reinicia|inyecta|agrega|agregar)\w*/;
+const EXEC_RE = /\b(?:ejecuta|ejecutar|corre|correr|lanza|lanzar|compila)\w*\b[^.]{0,30}\b(?:codigo|script|comando|comandos|programa|consulta|query|terminal|shell|bash|python|javascript|node|sql)\b|\b(?:sudo|chmod|powershell)\b|\brm\s+-rf|\b(?:abre|abrir|entra|accede|usa)\w*\s+(?:la\s+)?(?:terminal|consola|shell|linea\s+de\s+comandos)|\bcomandos?\s+administrativos?\b/;
+const PRIV_NOUN = /\b(rol(?:es)?|permisos?|privilegios?|administrador|admin|superusuario|superadmin|root|acceso\s+(?:total|completo))\b/;
+const PRIV_VERB = /\b(cambia|cambiar|cambiame|cambiarme|pasame|dame|darme|damelo|otorga|otorgar|concede|conceder|asigna|asignar|sube|subir|eleva|elevar|habilita|habilitar|hazme|ponme|convierteme|activa|activar|quita|quitar|modifica|modificar|quiero|necesito|dale|darle)\b/;
+const PLAN_CHANGE = /\b(?:cambia|cambiar|modifica|modificar|actualiza|actualizar|sube|subir|mejora|mejorar|cancela|cancelar|renueva|renovar|extiende|extender|pasa|pasame)\w*\b[^.]{0,25}\b(?:plan|suscripcion|membresia)\b|\b(?:plan|suscripcion|membresia)\b[^.]{0,25}\b(?:pro|premium|gratis|gratuito|sin\s+pagar)\b|\bcortesia\b|\bhazme\s+(?:pro|premium)\b/;
+const PRO_NOUN = /\b(pro|premium|plus|nota\s+pro|notas\s+pro|funciones?\s+(?:pro|pagadas?|de\s+pago)|modo\s+pro)\b/;
+const UNLOCK_VERB = /\b(activa|activar|activame|activalo|desbloquea|desbloquear|desbloqueame|habilita|habilitar|dame|darme|damelo|hazme|ponme|otorga|otorgame|concede|prende|enciende|regalame|gratis|sin\s+pagar|quiero\s+(?:tener|usar|el|la|las|los)|necesito|usa|usar|prueba|probar)\b/;
+const JB_RULES = /\b(?:ignora|ignorar|olvida|olvidar|omite|omitir|salta|saltate|desactiva|desactivar|anula|rompe|quita)\w*\b[^.]{0,40}\b(?:instrucciones|reglas|restricciones|limites|limitaciones|seguridad|filtros|protecciones|politicas|normas)\b/;
+const JB_MODE = /\b(?:modo|mode)\s+(?:desarrollador|developer|dios|god|admin|administrador|root|mantenimiento|depuracion|debug|sin\s+restricciones|jailbreak|dan)\b|\bdeveloper\s+mode\b|\bjailbreak\b|\bdan\b|\bsystem\s*prompt\b|\b(?:prompt|instrucciones)\s+(?:del\s+)?(?:sistema|internas?|ocultas?|secretas?)\b|\b(?:revela|muestra|dime|repite|lee)\w*\s+(?:tus|todas\s+tus|las)\s+(?:instrucciones|reglas)\b/;
+const JB_ROLE = /\b(?:finge|fingir|pretende|pretender|simula|simular|actua|actuar|imagina|supon|haz\s+de\s+cuenta|juega|interpreta|eres\s+ahora|ahora\s+eres|a\s+partir\s+de\s+ahora)\b[^.]{0,60}\b(?:sin\s+(?:restricciones|reglas|limites|filtros)|administrador|admin|root|superusuario|hacker|desarrollador|programador|dueno|creador|otra\s+ia|dios|libre)\b|\bsoy\s+(?:el\s+|tu\s+)?(?:administrador|admin|dueno|desarrollador|programador|creador|root|superusuario)\b/;
+
+/**
+ * ¿La petición intenta tocar seguridad, permisos, planes, secretos o administración? Devuelve el motivo y lo que Founder responde.
+ * `lenient`: la frase es una orden de datos (nota, venta, recordatorio): el texto solo se guarda como dato, así que solo se vigila la manipulación explícita.
+ * La respuesta nunca confirma nada: la voz no tiene autoridad para concederse permisos (el servidor decide el plan).
+ */
+export function checkRestricted(raw: string, pro: boolean, lenient = false): { kind: RestrictedKind; speech: string } | null {
+  const f = fold(raw);
+  const jailbreak = { kind: "jailbreak" as const, speech: "Mis límites no cambian con roles, juegos ni instrucciones habladas. Dime qué necesitas dentro de lo que sí puedo hacer: notas, recordatorios, ventas o consejos de negocio." };
+  if (JB_RULES.test(f) || JB_MODE.test(f)) return jailbreak;
+  if (lenient) return null;
+  if (JB_ROLE.test(f)) return jailbreak;
+  if ((PRO_NOUN.test(f) && UNLOCK_VERB.test(f)) || PLAN_CHANGE.test(f)) {
+    return {
+      kind: "pro_unlock",
+      speech: pro
+        ? "Tu cuenta ya tiene Founder Pro, así que no hay nada que activar. Pídeme el recordatorio y lo creo."
+        : "No puedo activar funciones Pro ni cambiar planes por voz: eso depende de la suscripción de tu cuenta y lo decide el servidor. Mientras tanto puedo guardarte notas normales y ayudarte con lo demás.",
+    };
+  }
+  if (SECRET_NOUN.test(f)) {
+    return { kind: "secrets", speech: "Eso no lo puedo hacer: no tengo acceso a claves, contraseñas, tokens ni credenciales, y nunca las comparto ni las cambio por voz." };
+  }
+  if (SQL_RE.test(f) || EXEC_RE.test(f) || (DB_NOUN.test(f) && DB_ACTION.test(f))) {
+    return { kind: "admin", speech: "No puedo modificar ni consultar la base de datos, ejecutar código ni hacer cambios administrativos desde la voz. Sí puedo ayudarte con tus notas, recordatorios y ventas." };
+  }
+  if (PRIV_NOUN.test(f) && PRIV_VERB.test(f)) {
+    return { kind: "privilege", speech: "Los roles, permisos y planes no se pueden cambiar por voz; los gestiona la cuenta de Founder en el servidor." };
+  }
+  return null;
+}
 
 // ---------- Ejecución ----------
 
@@ -545,11 +663,11 @@ async function createNote(deps: Deps, cmd: { title: string; content: string }): 
     }
     return { speech: "No pude confirmar que la nota se guardara. Revisa la sección Notas.", listenAgain: false, action: "create_note:unverified" };
   } catch (e) {
-    return { speech: `No pude guardar la nota. ${errText(e)}`, listenAgain: false, action: "create_note:error" };
+    return { speech: failureSpeech(e, "No pude guardar la nota.", true), listenAgain: false, action: "create_note:error" };
   }
 }
 
-async function createReminder(deps: Deps, title: string, at: Date): Promise<Reply> {
+async function createReminder(deps: Deps, title: string, at: Date, o: { content?: string; label?: string } = {}): Promise<Reply> {
   const now = deps.now();
   if (!deps.recommendations().pro) {
     return { speech: "Los recordatorios con fecha son parte de Founder Pro y tu plan no los incluye. Puedo guardarte una nota normal si quieres.", listenAgain: false, action: "reminder:not_pro" };
@@ -559,7 +677,7 @@ async function createReminder(deps: Deps, title: string, at: Date): Promise<Repl
   }
   try {
     const res = await deps.api.post<{ item: NoteLite }>("/api/business/notes", {
-      title: title.slice(0, 160), content: `${title}.`.replace(/\.+$/, "."), noteDate: at.toISOString(), timeZone: deps.timeZone, reminderLeadMinutes: 0,
+      title: title.slice(0, 160), content: (o.content ?? `${title}.`.replace(/\.+$/, ".")).slice(0, 4800), noteDate: at.toISOString(), timeZone: deps.timeZone, reminderLeadMinutes: 0,
     });
     const id = res?.item?.id;
     if (!id) return { speech: "No pude confirmar que el recordatorio se guardara. Revisa la sección Notas.", listenAgain: false, action: "reminder:unverified" };
@@ -571,12 +689,14 @@ async function createReminder(deps: Deps, title: string, at: Date): Promise<Repl
     if (found && !okTime) return { speech: "El recordatorio se guardó, pero sin la hora de aviso correcta. Revísalo en la sección Notas.", listenAgain: false, action: "reminder:unverified" };
     const alarm = deps.scheduleAlarm ? await deps.scheduleAlarm(found ?? res.item) : "ok";
     const when = whenText(at.toISOString(), now);
-    const base = `Listo. Te recordaré ${quote(title)} ${when}. Quedó guardado y verificado.`;
+    const base = o.label
+      ? `Listo. Guardé la nota y te recordaré ${o.label} ${when}. Quedó guardado y verificado.`
+      : `Listo. Te recordaré ${quote(title)} ${when}. Quedó guardado y verificado.`;
     const extra = alarm === "no_permission" ? " Pero Android tiene bloqueadas las notificaciones de Founder: actívalas en los ajustes para recibir el aviso."
       : alarm === "failed" ? " No pude programar el aviso en el teléfono; el recordatorio sí está guardado en tu cuenta." : "";
     return { speech: base + extra, display: `Recordatorio guardado: ${title} · ${when}`, listenAgain: false, action: alarm === "ok" ? "reminder:ok" : `reminder:ok_${alarm}` };
   } catch (e) {
-    return { speech: `No pude guardar el recordatorio. ${errText(e)}`, listenAgain: false, action: "reminder:error" };
+    return { speech: failureSpeech(e, "No pude guardar el recordatorio.", true), listenAgain: false, action: "reminder:error" };
   }
 }
 
@@ -598,7 +718,7 @@ async function salesSummary(deps: Deps, period: SalesPeriod, wantsProfit: boolea
     if (partial) speech += " Ojo: tengo solo tus últimas 300 ventas, así que el total podría estar incompleto.";
     return { speech, display: speech, listenAgain: false, action: "sales:summary" };
   } catch (e) {
-    return { speech: `No pude consultar tus ventas. ${errText(e)}`, listenAgain: false, action: "sales:error" };
+    return { speech: failureSpeech(e, "No pude consultar tus ventas.", false), listenAgain: false, action: "sales:error" };
   }
 }
 
@@ -616,7 +736,7 @@ async function saveSale(deps: Deps, p: { amount: number; currency: string; descr
     }
     return { speech: "El servidor aceptó la venta, pero no coincide al releerla. Revísala en la sección Negocio.", listenAgain: false, action: "sale:unverified" };
   } catch (e) {
-    return { speech: `No pude registrar la venta. ${errText(e)}`, listenAgain: false, action: "sale:error" };
+    return { speech: failureSpeech(e, "No pude registrar la venta.", true), listenAgain: false, action: "sale:error" };
   }
 }
 
@@ -635,7 +755,7 @@ async function listPending(deps: Deps, scope: "notes" | "recommendations" | "bot
         shown.push(...pend.map((n) => `• ${n.title} (${whenText(n.reminderAt!, now)})`));
       }
     } catch (e) {
-      parts.push(`No pude consultar tus notas. ${errText(e)}`);
+      parts.push(failureSpeech(e, "No pude consultar tus notas.", false));
     }
   }
   if (scope !== "notes") {
@@ -667,7 +787,7 @@ async function findNote(deps: Deps, q: { day: "today" | "yesterday" | "daybefore
       action: "find:ok",
     };
   } catch (e) {
-    return { speech: `No pude buscar tus notas. ${errText(e)}`, listenAgain: false, action: "find:error" };
+    return { speech: failureSpeech(e, "No pude buscar tus notas.", false), listenAgain: false, action: "find:error" };
   }
 }
 
@@ -680,7 +800,7 @@ async function analyze(deps: Deps): Promise<Reply> {
     const speech = firstSentences(`${s} ${acts.length ? `Acciones recomendadas: ${acts.map((a, i) => `${i + 1}. ${a}`).join(" ")}` : ""}`, 520, 5);
     return { speech, display: `${s}\n${acts.map((a) => `• ${a}`).join("\n")}`, listenAgain: false, action: "analyze:ok" };
   } catch (e) {
-    return { speech: `No pude analizar tu negocio. ${errText(e)}`, listenAgain: false, action: "analyze:error" };
+    return { speech: failureSpeech(e, "No pude analizar tu negocio.", false), listenAgain: false, action: "analyze:error" };
   }
 }
 
@@ -695,12 +815,13 @@ async function prepareDelete(deps: Deps, session: Session, keywords: string[]): 
     session.pending = { type: "delete_note", id: n.id, title: n.title };
     return { speech: `Encontré la nota ${quote(n.title)}. Para borrarla, confirma con el botón en pantalla. No la borro por voz.`, listenAgain: false, confirmDelete: { id: n.id, title: n.title }, action: "delete:await_button" };
   } catch (e) {
-    return { speech: `No pude buscar la nota. ${errText(e)}`, listenAgain: false, action: "delete:error" };
+    return { speech: failureSpeech(e, "No pude buscar la nota.", false), listenAgain: false, action: "delete:error" };
   }
 }
 
 /** Ejecuta el borrado SOLO tras pulsar el botón en pantalla; verifica que ya no exista. */
-export async function confirmDeleteByButton(deps: Deps, session: Session): Promise<Reply> {
+export async function confirmDeleteByButton(deps0: Deps, session: Session): Promise<Reply> {
+  const deps = guarded(deps0, true);
   const p = session.pending;
   if (!p || p.type !== "delete_note") return { speech: "No hay nada pendiente de borrar.", listenAgain: false };
   session.pending = null;
@@ -712,7 +833,7 @@ export async function confirmDeleteByButton(deps: Deps, session: Session): Promi
       ? { speech: `Hecho. Borré la nota ${quote(p.title)} y verifiqué que ya no existe.`, listenAgain: false, action: "delete:ok" }
       : { speech: "Pedí borrar la nota, pero sigue apareciendo. Revísala en la sección Notas.", listenAgain: false, action: "delete:unverified" };
   } catch (e) {
-    return { speech: `No pude borrar la nota. ${errText(e)}`, listenAgain: false, action: "delete:error" };
+    return { speech: failureSpeech(e, "No pude borrar la nota.", true), listenAgain: false, action: "delete:error" };
   }
 }
 
@@ -745,9 +866,260 @@ function saleQuestion(p: { amount: number; currency: string; description: string
 }
 
 /** Procesa una frase del usuario y devuelve lo que Founder responde. Modifica la sesión (confirmaciones pendientes). */
-export async function handleUtterance(deps: Deps, session: Session, utterance: string): Promise<Reply> {
+// ---------- Nota conversacional: pregunta los detalles, recomienda, ofrece recordatorio y guarda UNA sola vez al final ----------
+
+export type NoteStage = "topic" | "detail" | "offer" | "when";
+export interface EventInfo { label: string; key: string }
+
+const EVENTS: Array<[RegExp, string, string]> = [
+  [/\b(reuni(?:on|ones)|juntas?)\b/, "la reunión", "meeting"],
+  [/\b(citas?)\b/, "la cita", "appointment"],
+  [/\b(entrevistas?)\b/, "la entrevista", "interview"],
+  [/\b(llamadas?|llamar)\b/, "la llamada", "call"],
+  [/\b(entregas?|entregar)\b/, "la entrega", "delivery"],
+  [/\b(pagos?|pagar|cobros?|cobrar|facturas?)\b/, "el pago", "payment"],
+  [/\b(presentacion(?:es)?|conferencias?|eventos?|ferias?|talleres?|clases?|cursos?|examenes?|examen|capacitacion(?:es)?|webinar)\b/, "el evento", "event"],
+  [/\b(viajes?|vuelos?)\b/, "el viaje", "trip"],
+  [/\b(visitas?|reservas?)\b/, "esa visita", "visit"],
+  [/\b(cumpleanos|aniversario)\b/, "esa fecha", "date"],
+];
+
+/** ¿Habla de un compromiso con fecha (reunión, cita, entrega…)? Solo entonces la nota necesita detalles y puede llevar recordatorio. */
+export function detectEvent(f: string): EventInfo | null {
+  const hit = EVENTS.find(([re]) => re.test(f));
+  return hit ? { label: hit[1], key: hit[2] } : null;
+}
+
+const hasWhen = (w: Pick<WhenParts, "rel" | "day" | "time">) => !!(w.rel || w.day || w.time);
+
+/** Quita muletillas del inicio de una respuesta hablada: «sobre que mañana tengo…» → «mañana tengo…». */
+export function cleanTopic(raw: string): string {
+  let t = raw.trim();
+  for (let i = 0; i < 5; i++) {
+    const m = /^(?:es\s+)?(?:sobre|acerca\s+de|acerca|de|para|con|que|pues|bueno|eh|este|mira|ok|okey)\b[\s,:]*/.exec(fold(t));
+    if (!m || m[0].length === 0) break;
+    t = t.slice(m[0].length);
+  }
+  return t.replace(/^[\s,.:;-]+|[\s,.;]+$/g, "");
+}
+
+/** Recomendación breve y útil según el tipo de compromiso y de qué trata. Reglas fijas: sin IA, sin red, sin coste. */
+export function adviceFor(key: string | null, text: string): string | null {
+  const f = fold(text);
+  const inv = /\b(inversion|inversionista|inversionistas|socio|socios|banco|prestamo|credito)\b/.test(f);
+  const client = /\b(cliente|clientes|comprador|prospecto)\b/.test(f);
+  const supplier = /\b(proveedor|proveedores)\b/.test(f);
+  const team = /\b(equipo|empleados|personal)\b/.test(f);
+  switch (key) {
+    case "meeting":
+      if (inv) return "Te recomiendo llevar tus números clave y una petición concreta, para salir con un acuerdo claro.";
+      if (client) return "Te recomiendo definir antes qué quieres lograr con el cliente y llevar una propuesta con un siguiente paso concreto.";
+      if (supplier) return "Te recomiendo llevar precios y plazos de otras opciones para negociar con ventaja.";
+      if (team) return "Te recomiendo preparar una agenda corta y cerrar con tareas y responsables.";
+      return "Te recomiendo definir antes el objetivo de la reunión y anotar al final los acuerdos y los responsables.";
+    case "interview": return "Te recomiendo repasar tus logros con ejemplos concretos y preparar dos preguntas para ellos.";
+    case "call": return "Te recomiendo tener claro el objetivo de la llamada y apuntar los acuerdos al terminar.";
+    case "delivery": return "Te recomiendo confirmar con tiempo que todo esté listo y avisar al cliente si hay algún retraso.";
+    case "payment": return "Te recomiendo guardar el comprobante y confirmar el monto antes de pagar o cobrar.";
+    case "event": return "Te recomiendo llegar con anticipación y llevar material para presentar tu negocio.";
+    case "trip": return "Te recomiendo revisar documentos y reservas el día anterior.";
+    default: return null;
+  }
+}
+
+const NO_DETAIL = /^(?:no|nada|ninguno|ninguna|eso es todo|asi esta bien|ya|ya esta|listo|nada mas|no hay mas|sin detalles|no tengo mas)\b/;
+const CANCEL_RE = /\b(cancela\w*|olvidalo|olvidala|olvida\s+(?:eso|la\s+nota)|descarta\w*|no\s+(?:la\s+)?guardes|no\s+quiero\s+(?:la\s+)?nota)\b/;
+const sentence = (t: string) => (t.trim() ? `${capitalize(t.trim()).replace(/[\s.]+$/, "")}.` : "");
+
+type NoteFlow = Extract<Pending, { type: "note_flow" }>;
+
+function noteParts(st: Pick<NoteFlow, "topic" | "detail" | "event">): { title: string; content: string } {
+  const noun = st.event ? capitalize(st.event.label.replace(/^(la|el|esa|ese)\s+/, "")) : "";
+  const short = st.detail.replace(/\s+/g, " ").slice(0, 60).replace(/[\s,;:.]+$/, "");
+  const title = (noun ? (short ? `${noun}: ${short}` : noun) : capitalize(st.topic).slice(0, 80)).slice(0, 80).replace(/[\s,;:]+$/, "");
+  const content = [sentence(st.topic), sentence(st.detail)].filter(Boolean).join(" ").slice(0, 4800);
+  return { title, content };
+}
+
+function startNoteFlow(deps: Deps, session: Session, topicRaw: string | null): Promise<Reply> | Reply {
+  const none = { rel: null, day: null, time: null };
+  if (topicRaw === null) {
+    session.pending = { type: "note_flow", stage: "topic", topic: "", detail: "", event: null, when: none, tries: 0 };
+    return { speech: "Claro, ¿sobre qué es?", listenAgain: true, action: "note:ask_topic" };
+  }
+  return afterTopic(deps, session, topicRaw);
+}
+
+function afterTopic(deps: Deps, session: Session, topicRaw: string): Promise<Reply> | Reply {
+  const topic = cleanTopic(topicRaw) || topicRaw.trim();
+  const event = detectEvent(fold(topic));
+  const w = parseWhen(topic, deps.now());
+  // Una nota simple y completa («anota que compré harina») se guarda directo; un compromiso con fecha pide sus detalles primero.
+  if (!event && !hasWhen(w)) { session.pending = null; return createNote(deps, noteFromTopic(topic)); }
+  session.pending = { type: "note_flow", stage: "detail", topic, detail: "", event, when: { rel: w.rel, day: w.day, time: w.time }, tries: 0 };
+  return { speech: event ? `¿De qué trata ${event.label}?` : "¿Qué más debo anotar sobre eso?", listenAgain: true, action: "note:ask_detail" };
+}
+
+async function savePlainNote(deps: Deps, session: Session, st: NoteFlow, prefix = ""): Promise<Reply> {
+  session.pending = null;
+  const r = await createNote(deps, { ...noteParts(st) });
+  return { ...r, speech: prefix + r.speech };
+}
+
+async function saveReminderNote(deps: Deps, session: Session, st: NoteFlow, at: Date): Promise<Reply> {
+  session.pending = null;
+  const { title, content } = noteParts(st);
+  const r = await createReminder(deps, title, at, { content, label: st.event?.label ?? "esa nota" });
+  // Si el recordatorio no llegó a crearse (plan sin Pro u hora pasada), la nota no se pierde: se guarda normal.
+  if (r.action === "reminder:not_pro") return savePlainNote(deps, session, st, "Los recordatorios son parte de Founder Pro y tu plan no los incluye. ");
+  return r;
+}
+
+async function noteFlowStep(deps: Deps, session: Session, st: NoteFlow, text: string): Promise<Reply> {
+  const f = fold(text);
+  if (CANCEL_RE.test(f)) { session.pending = null; return { speech: "De acuerdo, no guardé nada.", listenAgain: false, action: "note:cancelled" }; }
+  const now = deps.now();
+  const merge = (w: WhenParts) => ({ rel: w.rel ?? st.when.rel, day: w.day ?? st.when.day, time: w.time ?? st.when.time });
+
+  if (st.stage === "topic") return afterTopic(deps, session, text);
+
+  if (st.stage === "detail") {
+    const none = NO_DETAIL.test(f.trim()) && words(f).length <= 5;
+    const detail = none ? "" : cleanTopic(text);
+    const when = merge(parseWhen(detail, now));
+    const advice = adviceFor(st.event?.key ?? null, `${st.topic} ${detail}`);
+    const next: NoteFlow = { ...st, detail, when, stage: "offer", tries: 0 };
+    // Solo se ofrece recordatorio si el plan de la cuenta lo incluye y hay un compromiso con fecha. La nota no lo exige.
+    if (!(deps.recommendations().pro && (st.event || hasWhen(when)))) {
+      const r = await savePlainNote(deps, session, next);
+      return advice && r.action?.endsWith(":ok") ? { ...r, speech: `${r.speech} ${advice}` } : r;
+    }
+    session.pending = next;
+    return { speech: `${advice ? advice + " " : ""}¿Quieres que también te recuerde ${st.event?.label ?? "eso"}?`, listenAgain: true, action: "note:offer_reminder" };
+  }
+
+  const w = parseWhen(text, now);
+  const when = merge(w);
+  const yn = parseYesNo(text);
+
+  if (st.stage === "offer") {
+    if (yn === "no" && !hasWhen(w)) return savePlainNote(deps, session, st, "De acuerdo, sin recordatorio. ");
+    if (yn === "yes" || hasWhen(w)) {
+      const at = resolveWhen(when, now);
+      if (at && at.getTime() > now.getTime() + 5000) return saveReminderNote(deps, session, { ...st, when }, at);
+      session.pending = { ...st, when: at ? { rel: null, day: null, time: null } : when, stage: "when", tries: 0 };
+      return { speech: at ? "Esa hora ya pasó. Dime otra fecha y hora." : when.day ? "Perfecto. ¿A qué hora?" : "Perfecto. ¿Para cuándo? Dime el día y la hora.", listenAgain: true, action: "note:ask_when" };
+    }
+    if (st.tries >= 1) return savePlainNote(deps, session, st, "No entendí tu respuesta, así que guardé la nota sin recordatorio. ");
+    session.pending = { ...st, tries: st.tries + 1 };
+    return { speech: `No te entendí. ¿Quieres que te recuerde ${st.event?.label ?? "eso"}? Di sí o no.`, listenAgain: true, action: "note:reask_offer" };
+  }
+
+  // stage === "when"
+  const at = resolveWhen(when, now);
+  if (at) {
+    if (at.getTime() > now.getTime() + 5000) return saveReminderNote(deps, session, { ...st, when }, at);
+    session.pending = { ...st, when: { rel: null, day: null, time: null } };
+    return { speech: "Esa hora ya pasó. Dime otra fecha y hora.", listenAgain: true, action: "note:past" };
+  }
+  if (yn === "no") return savePlainNote(deps, session, st, "De acuerdo, sin recordatorio. ");
+  if (st.tries >= 1) return savePlainNote(deps, session, st, "No logré entender la hora, así que guardé la nota sin recordatorio. ");
+  session.pending = { ...st, when, tries: st.tries + 1 };
+  return { speech: when.day ? "No te entendí la hora. Dime, por ejemplo: a las tres de la tarde." : "No te entendí. Dime el día y la hora, por ejemplo: mañana a las tres de la tarde.", listenAgain: true, action: "note:reask_when" };
+}
+
+// ---------- Identidad: respuestas con datos reales y configurados (si falta uno, se reconoce) ----------
+
+function identityReply(deps: Deps, f: string, pro: boolean): Reply | null {
+  const creator = deps.identity?.creator?.trim() || null;
+  const mk = (speech: string, action: string): Reply => ({ speech, listenAgain: false, action });
+  if (/\b(que|cual)\s+(empresa|compania)\b[^.]{0,25}\b(te|hizo|creo|detras)/.test(f)) {
+    return mk(creator ? `Me creó ${creator}. No tengo registrado el nombre de ninguna empresa, así que prefiero no inventarlo.` : "No tengo registrado quién me creó ni qué empresa hay detrás, y prefiero no inventarlo.", "identity:company");
+  }
+  if (/\b(quien|quienes)\b[^.]{0,30}\b(te\s+(?:creo|hizo|programo|desarrollo|diseno|invento|construyo|ideo)|esta\s+detras)\b|\b(?:tu|su)\s+(?:creador|creadora|desarrollador|programador|autor)\b|\bde\s+quien\s+eres\b/.test(f)) {
+    return mk(creator ? `Me creó ${creator}.` : "No tengo registrado quién me creó, y prefiero no inventarlo.", "identity:creator");
+  }
+  if (/\b(quien\s+eres|como\s+te\s+llamas|cual\s+es\s+tu\s+nombre|que\s+eres)\b/.test(f)) {
+    return mk("Soy Founder, el asistente de voz de la aplicación Founder. Te ayudo con notas, recordatorios, ventas y preguntas de negocio.", "identity:who");
+  }
+  if (/\bque\s+es\s+founder\b|\bfounder\s+que\s+es\b|\bpara\s+que\s+sirve\s+(?:founder|esta\s+(?:app|aplicacion)|la\s+(?:app|aplicacion))\b|\bde\s+que\s+trata\s+(?:founder|esta\s+(?:app|aplicacion))\b/.test(f)) {
+    return mk("Founder es una aplicación para emprendedores: te ayuda a pensar tu negocio con un asistente de inteligencia artificial, a llevar notas con recordatorios y a registrar tus ventas, clientes y productos.", "identity:what");
+  }
+  if (/\bque\s+(?:puedes|sabes|haces)\b|\bcomo\s+(?:me\s+)?puedes\s+ayudar|\ben\s+que\s+me\s+(?:puedes\s+)?ayudas?\b|\bpara\s+que\s+sirves\b/.test(f)) {
+    return mk(`Puedo anotar y consultar tus notas, registrar y resumir tus ventas, decirte tus pendientes, analizar tu negocio y responder preguntas de emprendimiento o generales. ${pro ? "Como tu cuenta tiene Pro, también creo recordatorios con alarma." : "Los recordatorios con alarma son parte de Founder Pro."} Para borrar algo siempre te pido confirmarlo con el botón.`, "identity:can");
+  }
+  if (/\bcomo\s+(?:funciona|se\s+usa|uso|puedo\s+usar)\s+(?:esta|la|founder|esto|el\s+asistente)\b|\bcomo\s+funciona\s*$/.test(f)) {
+    return mk("Me hablas y te escucho sin que toques nada; yo respondo y vuelvo a escuchar. Tus notas, ventas y recordatorios se guardan en tu cuenta de Founder, y las notas también puedes verlas y editarlas a mano en la sección Notas. Para interrumpirme di «detente».", "identity:how");
+  }
+  if (/\b(?:que|cual)\s+(?:plan|suscripcion)\s+tengo\b|\bmi\s+plan\b|\b(?:soy|tengo)\s+(?:cuenta\s+)?(?:pro|premium)\b|\btengo\s+(?:el\s+)?plan\b/.test(f)) {
+    return mk(pro ? "Tu cuenta tiene el plan Pro." : "Tu cuenta tiene el plan gratuito. Los recordatorios con alarma son parte de Founder Pro.", "identity:plan");
+  }
+  return null;
+}
+
+/** Primera frase completa de una respuesta que aún se está recibiendo: permite empezar a hablar antes de que termine el texto. */
+export function takeFirstSentence(buf: string, min = 24): string | null {
+  const m = new RegExp(`^([\\s\\S]{${min},}?[.!?])\\s+\\S`).exec(cleanForSpeech(buf));
+  return m ? m[1].trim() : null;
+}
+
+// ---------- Entrada principal ----------
+
+const DATA_COMMANDS = new Set(["create_note", "create_note_topic_missing", "register_sale", "create_reminder", "find_note", "delete_note"]);
+const SWITCH_COMMANDS = new Set(["sales_summary", "list_pending", "find_note", "analyze", "delete_note", "delete_other", "create_note", "create_note_topic_missing"]);
+
+/** ¿La frase, en medio de la nota, es en realidad otra orden (cambio de tema)? */
+function isTopicChange(deps: Deps, text: string): boolean {
+  const cmd = parseCommand(text, deps.now());
+  const f = fold(text);
+  if (SWITCH_COMMANDS.has(cmd.kind)) return true;
+  if (cmd.kind === "register_sale" && /\bregistra/.test(f)) return true;
+  if (identityReply(deps, f, false)) return true;
+  return checkRestricted(text, deps.recommendations().pro, false) !== null;
+}
+
+async function route(deps: Deps, session: Session, text: string): Promise<Reply> {
+  const cmd = parseCommand(text, deps.now());
+  const pro = deps.recommendations().pro;
+  const blocked = checkRestricted(text, pro, DATA_COMMANDS.has(cmd.kind));
+  if (blocked) return { speech: blocked.speech, listenAgain: false, action: `blocked:${blocked.kind}` };
+  switch (cmd.kind) {
+    case "create_note": return startNoteFlow(deps, session, cmd.topic);
+    case "create_note_topic_missing": return startNoteFlow(deps, session, null);
+    case "register_sale":
+      if (cmd.amount === null || cmd.amount <= 0) {
+        session.pending = { type: "sale_amount", description: cmd.description };
+        return { speech: "¿De cuánto fue la venta?", listenAgain: true, action: "sale:ask_amount" };
+      }
+      session.pending = { type: "sale", amount: cmd.amount, currency: cmd.currency, description: cmd.description };
+      return saleQuestion({ amount: cmd.amount, currency: cmd.currency, description: cmd.description });
+    case "create_reminder": return continueReminder(deps, session, cmd.title, cmd.when);
+    case "sales_summary": return salesSummary(deps, cmd.period, cmd.wantsProfit);
+    case "list_pending": return listPending(deps, cmd.scope);
+    case "find_note": return findNote(deps, cmd);
+    case "analyze": return analyze(deps);
+    case "delete_note": return prepareDelete(deps, session, cmd.keywords);
+    case "delete_other": return { speech: "Por seguridad, borrar o cancelar ventas, clientes o productos solo se hace desde la pantalla de Negocio.", listenAgain: false, action: "delete:other" };
+    case "chat": {
+      const own = identityReply(deps, fold(text), pro);
+      if (own) return own;
+      try {
+        const r = await deps.chat(cmd.text, session.conversationId, deps.onFirstSentence);
+        session.conversationId = r.conversationId ?? session.conversationId;
+        const speech = firstSentences(r.text);
+        if (!speech) return { speech: "No tengo una respuesta segura para eso. Puedo ayudarte con tus notas, tus ventas o con una pregunta de negocio.", listenAgain: false, action: "chat:empty" };
+        return { speech, display: r.text, listenAgain: false, action: "chat" };
+      } catch (e) {
+        return { speech: failureSpeech(e, "No pude responderte eso ahora.", false), listenAgain: false, action: "chat:error" };
+      }
+    }
+  }
+}
+
+export async function handleUtterance(deps0: Deps, session: Session, utterance: string): Promise<Reply> {
   const text = utterance.trim();
   if (!text) return { speech: "No te escuché. Toca la esfera y vuelve a intentarlo.", listenAgain: false, action: "empty" };
+  const deps = guarded(deps0);
   const pending = session.pending;
 
   if (pending?.type === "sale") {
@@ -771,45 +1143,18 @@ export async function handleUtterance(deps: Deps, session: Session, utterance: s
     const title = pending.title ?? (reminderTitle(text, w.spans) || null);
     return continueReminder(deps, session, title ? capitalize(title).slice(0, 150) : null, merged);
   }
-  if (pending?.type === "note_topic") {
+  if (pending?.type === "note_flow") {
+    if (!isTopicChange(deps, text)) return noteFlowStep(deps, session, pending, text);
+    // Cambio de tema: no se guarda nada a medias, y se avisa.
     session.pending = null;
-    const c = noteFromTopic(text);
-    return createNote(deps, c);
+    const r = await route(deps, session, text);
+    return { ...r, speech: `Dejé la nota sin guardar. ${r.speech}` };
   }
   if (pending?.type === "delete_note") {
     // El borrado solo se confirma con el botón. Una frase nueva descarta la solicitud.
     session.pending = null;
   }
-
-  const cmd = parseCommand(text, deps.now());
-  switch (cmd.kind) {
-    case "create_note": return createNote(deps, cmd);
-    case "create_note_topic_missing":
-      session.pending = { type: "note_topic" };
-      return { speech: "Claro. ¿Sobre qué quieres la nota?", listenAgain: true, action: "note:ask_topic" };
-    case "register_sale":
-      if (cmd.amount === null || cmd.amount <= 0) {
-        session.pending = { type: "sale_amount", description: cmd.description };
-        return { speech: "¿De cuánto fue la venta?", listenAgain: true, action: "sale:ask_amount" };
-      }
-      session.pending = { type: "sale", amount: cmd.amount, currency: cmd.currency, description: cmd.description };
-      return saleQuestion({ amount: cmd.amount, currency: cmd.currency, description: cmd.description });
-    case "create_reminder": return continueReminder(deps, session, cmd.title, cmd.when);
-    case "sales_summary": return salesSummary(deps, cmd.period, cmd.wantsProfit);
-    case "list_pending": return listPending(deps, cmd.scope);
-    case "find_note": return findNote(deps, cmd);
-    case "analyze": return analyze(deps);
-    case "delete_note": return prepareDelete(deps, session, cmd.keywords);
-    case "delete_other": return { speech: "Por seguridad, borrar o cancelar ventas, clientes o productos solo se hace desde la pantalla de Negocio.", listenAgain: false, action: "delete:other" };
-    case "chat":
-      try {
-        const r = await deps.chat(cmd.text, session.conversationId);
-        session.conversationId = r.conversationId ?? session.conversationId;
-        return { speech: firstSentences(r.text) || "No tengo una respuesta para eso.", display: r.text, listenAgain: false, action: "chat" };
-      } catch (e) {
-        return { speech: `No pude consultar a Founder. ${errText(e)}`, listenAgain: false, action: "chat:error" };
-      }
-  }
+  return route(deps, session, text);
 }
 
 
