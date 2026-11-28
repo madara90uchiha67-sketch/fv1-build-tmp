@@ -1,12 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useLocalSearchParams } from "expo-router";
 import { UI_PREVIEW } from "../../src/lib/config";
-import { Alert, BackHandler, Pressable, StyleSheet, View } from "react-native";
+import { Alert, BackHandler, Image, Pressable, StyleSheet, View } from "react-native";
 import Constants from "expo-constants";
 import { AppText, Button, Input, Screen } from "../../src/components/ui";
 import { errorMessage, request } from "../../src/lib/api";
 import { FEEDBACK_URL, LEGAL_LINKS } from "../../src/lib/config";
 import { openUrl } from "../../src/lib/links";
+import { loadAvatar, pickAvatar, saveAvatar } from "../../src/lib/avatar";
 import { useSession } from "../../src/lib/session";
 import { canNotify, openNotificationSettings } from "../../modules/founder-reminders";
 import { isPro } from "../../src/lib/notes-logic";
@@ -38,10 +39,14 @@ function LinkRow({ label, onPress, last = false, danger = false }: { label: stri
   );
 }
 
-function Avatar({ initials, size, radiusPx, fontSize }: { initials: string; size: number; radiusPx: number; fontSize: number }) {
+function Avatar({ initials, size, radiusPx, fontSize, photo }: { initials: string; size: number; radiusPx: number; fontSize: number; photo?: string | null }) {
   return (
-    <View style={{ width: size, height: size, borderRadius: radiusPx, backgroundColor: "#c9c9c9", alignItems: "center", justifyContent: "center" }}>
-      <AppText style={{ color: "#111", fontSize, fontFamily: "sans-serif-medium", fontWeight: "700" }}>{initials}</AppText>
+    <View style={{ width: size, height: size, borderRadius: radiusPx, backgroundColor: "#c9c9c9", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+      {photo ? (
+        <Image source={{ uri: photo }} style={{ width: size, height: size }} accessibilityIgnoresInvertColors />
+      ) : (
+        <AppText style={{ color: "#111", fontSize, fontFamily: "sans-serif-medium", fontWeight: "700" }}>{initials}</AppText>
+      )}
     </View>
   );
 }
@@ -57,6 +62,21 @@ export default function AccountScreen() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [themeMessage, setThemeMessage] = useState<string | null>(null);
   const [notifOn, setNotifOn] = useState<boolean>(() => canNotify());
+  const [photo, setPhoto] = useState<string | null>(() => loadAvatar(user?.id));
+  const [photoMsg, setPhotoMsg] = useState<string | null>(null);
+
+  async function changePhoto() {
+    if (!user) return;
+    setPhotoMsg(null);
+    const r = await pickAvatar();
+    if (r.ok) { saveAvatar(user.id, r.uri); setPhoto(r.uri); }
+    else if (r.reason === "failed") setPhotoMsg("No pude usar esa foto. Prueba con otra imagen.");
+  }
+  function removePhoto() {
+    if (!user) return;
+    saveAvatar(user.id, null);
+    setPhoto(null);
+  }
 
   useEffect(() => {
     if (UI_PREVIEW) setAccountOpen(view === "cuenta"); // solo verificación visual en CI
@@ -91,6 +111,7 @@ export default function AccountScreen() {
     setDeleting(true);
     setDeleteError(null);
     try {
+      if (user) saveAvatar(user.id, null);
       await deleteAccount();
     } catch (e) {
       setDeleteError(errorMessage(e));
@@ -121,7 +142,14 @@ export default function AccountScreen() {
         {header("Cuenta", "Tu perfil en Founder")}
 
         <View style={[styles.card, { alignItems: "center", paddingVertical: sz(22) }]} accessible accessibilityLabel={`Perfil: ${user?.name ?? "sin nombre"}, ${user?.email}, ${planName}`}>
-          <Avatar initials={initials} size={sz(96)} radiusPx={sz(30)} fontSize={sz(26)} />
+          <Pressable onPress={() => void changePhoto()} accessibilityRole="button" accessibilityLabel="Cambiar foto de perfil" hitSlop={6}>
+            <Avatar initials={initials} size={sz(96)} radiusPx={sz(30)} fontSize={sz(26)} photo={photo} />
+          </Pressable>
+          <View style={{ flexDirection: "row", gap: sz(18), marginTop: spacing.sm }}>
+            <Pressable onPress={() => void changePhoto()} accessibilityRole="button" hitSlop={8}><AppText variant="small" color={colors.text}>{photo ? "Cambiar foto" : "Añadir foto"}</AppText></Pressable>
+            {photo ? <Pressable onPress={removePhoto} accessibilityRole="button" hitSlop={8}><AppText variant="small" color={colors.textMuted}>Quitar foto</AppText></Pressable> : null}
+          </View>
+          {photoMsg ? <AppText variant="small" color={colors.danger} accessibilityLiveRegion="polite" style={{ marginTop: spacing.xs }}>{photoMsg}</AppText> : null}
           <AppText style={{ fontSize: sz(20), lineHeight: sz(26), marginTop: spacing.md }}>{user?.name?.trim() || "Sin nombre"}</AppText>
           <AppText variant="small" color={colors.textMuted} style={{ marginTop: 2 }}>{user?.email || "Cuenta de Founder"}</AppText>
         </View>
@@ -167,7 +195,7 @@ export default function AccountScreen() {
       {header("Configuración", "Founder")}
 
       <Pressable onPress={() => setAccountOpen(true)} accessibilityRole="button" accessibilityLabel={`Abrir cuenta de ${user?.name ?? "usuario"}, ${planName}`} style={({ pressed }) => [styles.profileCard, { opacity: pressed ? 0.8 : 1 }]}>
-        <Avatar initials={initials} size={sz(52)} radiusPx={sz(17)} fontSize={sz(17)} />
+        <Avatar initials={initials} size={sz(52)} radiusPx={sz(17)} fontSize={sz(17)} photo={photo} />
         <View style={{ flex: 1, minWidth: 0 }}>
           <AppText numberOfLines={1} style={{ fontSize: sz(18), lineHeight: sz(24) }}>{user?.name?.trim() || "Sin nombre"}</AppText>
           <AppText variant="small" color={colors.textMuted} style={{ marginTop: 3, fontSize: sz(11.5) }}>{planName}</AppText>

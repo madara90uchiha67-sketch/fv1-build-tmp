@@ -8,7 +8,7 @@ import { Orb } from "./VoiceCall";
 import { AppText, Button } from "./ui";
 import { GUTTER, colors, spacing, sz } from "../theme";
 
-// Modo de voz de Founder: esfera al centro y nada más. Usa los colores del tema elegido en Founder (claro u oscuro): no tiene
+// Modo de voz de Founder: esfera al centro y nada más (la conversación no se muestra aquí; queda en el chat). Usa los colores del tema elegido en Founder (claro u oscuro): no tiene
 // una apariencia propia. El tema se aplica al abrir la app (cambiarlo la reinicia), así que el modo de voz siempre coincide. Sin botones de llamada, colgar ni silenciar.
 // Escucha sola al abrirse y vuelve a escuchar tras cada respuesta. Un único control discreto (X) para salir; el botón
 // «atrás» de Android también sale. Tocar la esfera: interrumpe a Founder, o reanuda la escucha si se pausó.
@@ -32,7 +32,6 @@ export function FounderVoice({ onClose }: { onClose: () => void }) {
     return () => sub.remove();
   }, [onClose]);
 
-  const last = [...t.lines].reverse().find((l) => l.text.trim().length > 0);
   const status = STATUS[t.phase];
 
   return (
@@ -57,10 +56,6 @@ export function FounderVoice({ onClose }: { onClose: () => void }) {
 
         {status ? <AppText variant="small" color={MUTED} style={styles.status} accessibilityLiveRegion="polite">{status}</AppText> : null}
 
-        {last && !t.error ? (
-          <AppText variant="small" color={last.role === "user" ? MUTED : TEXT} numberOfLines={4} style={styles.caption}>{last.text}</AppText>
-        ) : null}
-
         {t.error ? (
           <View style={styles.block} accessibilityLiveRegion="polite">
             <AppText variant="small" color={DANGER} style={{ textAlign: "center" }}>{t.error.message}</AppText>
@@ -72,7 +67,7 @@ export function FounderVoice({ onClose }: { onClose: () => void }) {
 
         {t.pendingDelete ? (
           <View style={styles.block} accessibilityLiveRegion="polite">
-            <AppText variant="small" color={DANGER} style={{ textAlign: "center" }}>{`¿Borrar la nota «${t.pendingDelete.title}»? No se puede deshacer.`}</AppText>
+            <AppText variant="small" color={TEXT} style={{ textAlign: "center" }}>{`¿Borrar la nota «${t.pendingDelete.title}»? No se puede deshacer.`}</AppText>
             <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.md }}>
               <Button title="Cancelar" variant="secondary" onPress={t.cancelDelete} />
               <Button title="Borrar nota" onPress={t.confirmDelete} />
@@ -94,7 +89,6 @@ const styles = StyleSheet.create({
   close: { width: sz(40), height: sz(40), alignItems: "center", justifyContent: "center" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", minHeight: 0 },
   status: { marginTop: spacing.xs, textAlign: "center" },
-  caption: { marginTop: spacing.lg, textAlign: "center", fontSize: sz(15), lineHeight: sz(21), paddingHorizontal: spacing.md },
   block: { marginTop: spacing.md, alignItems: "center", alignSelf: "stretch" },
   notice: { marginTop: spacing.md, textAlign: "center", paddingHorizontal: spacing.md },
 });

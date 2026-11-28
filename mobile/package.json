@@ -18,6 +18,8 @@
     "expo": "~57.0.24",
     "expo-constants": "~57.0.24",
     "expo-font": "~57.0.4",
+    "expo-image-manipulator": "~57.0.23",
+    "expo-image-picker": "~57.0.22",
     "expo-linking": "~57.0.14",
     "expo-router": "~57.0.31",
     "expo-secure-store": "~57.0.4",

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Appearance } from "react-native";
 import { Stack, useGlobalSearchParams, usePathname, useRouter, useSegments, type Href } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
@@ -10,6 +10,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { SessionProvider, useSession } from "../src/lib/session";
 import { errorMessage } from "../src/lib/api";
 import { ErrorState } from "../src/components/states";
+import { Onboarding, needsOnboarding } from "../src/components/Onboarding";
 import { Screen } from "../src/components/ui";
 import { colors, fonts, themeName } from "../src/theme";
 
@@ -43,7 +44,8 @@ function safeCallbackUrl(value: string | string[] | undefined): string {
 }
 
 function Gate() {
-  const { status, bootError, retryBoot } = useSession();
+  const { status, user, bootError, retryBoot } = useSession();
+  const [onboardingOpen, setOnboardingOpen] = useState<boolean | null>(null);
   const segments = useSegments();
   const router = useRouter();
   const pathname = usePathname();
@@ -64,6 +66,11 @@ function Gate() {
     }
   }, [status, segments, router, pathname, params]);
 
+  useEffect(() => {
+    if (status === "auth" && user) setOnboardingOpen(needsOnboarding(user.id));
+    else if (status === "anon") setOnboardingOpen(null);
+  }, [status, user?.id]);
+
   if (status === "loading") return null;
   if (status === "error") {
     return (
@@ -74,11 +81,14 @@ function Gate() {
   }
 
   return (
-    <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.bg } }}>
-      <Stack.Screen name="estrategia" options={{ ...headerOptions, title: "Estrategia" }} />
-      <Stack.Screen name="historial" options={{ ...headerOptions, title: "Historial de chats" }} />
-      <Stack.Screen name="negocio/formulario" options={{ ...headerOptions, title: "Registro" }} />
-    </Stack>
+    <>
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.bg } }}>
+        <Stack.Screen name="estrategia" options={{ ...headerOptions, title: "Estrategia" }} />
+        <Stack.Screen name="historial" options={{ ...headerOptions, title: "Historial de chats" }} />
+        <Stack.Screen name="negocio/formulario" options={{ ...headerOptions, title: "Registro" }} />
+      </Stack>
+      {onboardingOpen && user ? <Onboarding userId={user.id} onDone={() => setOnboardingOpen(false)} /> : null}
+    </>
   );
 }
 

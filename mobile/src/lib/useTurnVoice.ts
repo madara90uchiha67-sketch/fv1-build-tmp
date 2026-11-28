@@ -50,7 +50,7 @@ async function askChat(text: string, conversationId: string | null, onFirstSente
         else if (e.type === "delta") {
           acc.answer += e.text;
           if (!acc.first && onFirstSentence) {
-            const s = takeFirstSentence(acc.answer);
+            const s = takeFirstSentence(acc.answer, 16);
             if (s) { acc.first = true; onFirstSentence(s); }
           }
         } else if (e.type === "error") acc.failure = e.message;
@@ -380,7 +380,7 @@ export function useTurnVoice() {
         speech.cancelListening();
         setLevels((l) => ({ ...l, out: 0 }));
         setP("listening");
-        later(listen, 350); // deja que se apague la cola del altavoz antes de volver a escuchar
+        later(listen, 200); // deja que se apague la cola del altavoz antes de volver a escuchar
       }),
       onSpeech("onSpeakError", ({ id }) => {
         if (id !== curSpeakId || ph !== "speaking") return;
