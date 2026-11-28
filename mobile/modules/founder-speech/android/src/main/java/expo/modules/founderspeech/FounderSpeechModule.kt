@@ -34,25 +34,11 @@ class FounderSpeechModule : Module() {
   private var voiceName: String? = null
   private var pendingSpeak: (() -> Unit)? = null
 
-  // Voz masculina neuronal local (principal). La voz de Android queda como respaldo si no se pudo cargar.
-  private var neural: NeuralVoice? = null
-  private fun neuralVoice(): NeuralVoice? {
-    val c = context ?: return null
-    return neural ?: NeuralVoice(
-      c,
-      emit = { name, payload -> sendEvent(name, payload) },
-      onUnavailable = { text, id, rate -> main.post { speakAndroid(text, id, 1.0f, rate) } },
-      onReady = { main.post { sendEvent("onVoices", mapOf("voices" to voiceEntries())) } },
-    ).also { neural = it }
-  }
-
   private val context: Context?
     get() = appContext.reactContext
 
   override fun definition() = ModuleDefinition {
     Name("FounderSpeech")
-    OnCreate { main.post { try { neuralVoice()?.prepare() } catch (_: Throwable) {} } }
-
     Events("onReady", "onBegin", "onEnd", "onPartial", "onResult", "onError", "onLevel", "onSpeakStart", "onSpeakDone", "onSpeakError", "onSupport", "onVoices")
 
     // ---- Reconocimiento ----
@@ -115,7 +101,6 @@ class FounderSpeechModule : Module() {
     }
 
     Function("stopSpeaking") {
-      try { neural?.stop() } catch (_: Throwable) {}
       main.post { try { tts?.stop() } catch (_: Exception) {} }
       true
     }
@@ -127,14 +112,13 @@ class FounderSpeechModule : Module() {
     // Arranca el motor de voz con antelación (la primera respuesta no espera a que cargue) y avisa con las voces disponibles.
     Function("warmUp") {
       main.post {
-        try { neuralVoice()?.prepare() } catch (_: Throwable) {}
         ensureTts { sendEvent("onVoices", mapOf("voices" to voiceEntries())) }
       }
       true
     }
 
     // Estado de la voz masculina local: "ready" | "preparing" | "failed" | "idle".
-    Function("neuralStatus") { neural?.state?.name?.lowercase() ?: "idle" }
+    Function("neuralStatus") { "idle" }
 
     Function("getVoice") { voiceName }
 
@@ -149,7 +133,6 @@ class FounderSpeechModule : Module() {
         try { tts?.stop(); tts?.shutdown() } catch (_: Exception) {}
         tts = null
         ttsReady = false
-        try { neural?.shutdown() } catch (_: Throwable) {}
       }
     }
   }
@@ -287,7 +270,6 @@ class FounderSpeechModule : Module() {
       .sortedBy { it.name }
 
   private fun voiceEntries(): List<String> =
-    (if (neural?.ready() == true) listOf("${NeuralVoice.NAME}|es-MX|500|0|male,neural") else emptyList<String>()) +
     allSpanishVoices().map { "${it.name}|${it.locale.toLanguageTag()}|${it.quality}|${if (it.isNetworkConnectionRequired) 1 else 0}|${(it.features ?: emptySet<String>()).joinToString(",")}" }
 
   private fun offlineSpanishVoices(): List<Voice> =
@@ -296,12 +278,6 @@ class FounderSpeechModule : Module() {
       .sortedBy { it.name }
 
   private fun speakMain(text: String, id: String, pitch: Float, rate: Float) {
-    // Voz masculina neuronal: es la predeterminada y solo se deja de usar si el usuario eligió expresamente otra.
-    val n = neural
-    if (n != null && n.usable() && (voiceName == null || voiceName == NeuralVoice.NAME)) {
-      n.speak(text, id, rate)
-      return
-    }
     speakAndroid(text, id, pitch, rate)
   }
 

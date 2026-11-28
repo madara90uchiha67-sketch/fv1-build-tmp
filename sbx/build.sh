@@ -6,7 +6,6 @@ export ANDROID_HOME=${ANDROID_HOME:-$HOME/android-sdk}; export ANDROID_SDK_ROOT=
 source ~/ks/env.sh
 [ -f ~/pub.env ] && source ~/pub.env
 cd $HOME/fv1-build-tmp/mobile
-bash ci/fetch-neural-voice.sh
 (npm ci --no-audit --no-fund 2>&1 || npm install --no-audit --no-fund 2>&1) | tail -3
 npm test 2>&1 | tail -8 || true
 npx expo prebuild --platform android --no-install --clean 2>&1 | tail -3

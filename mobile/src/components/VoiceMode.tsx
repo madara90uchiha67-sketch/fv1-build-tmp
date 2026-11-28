@@ -4,7 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTurnVoice, type TurnPhase } from "../lib/useTurnVoice";
 import type { VoicePhase } from "../lib/realtime-events";
-import { Orb } from "./VoiceCall";
+import { FounderOrb } from "./FounderOrb";
 import { AppText, Button } from "./ui";
 import { GUTTER, colors, spacing, sz } from "../theme";
 
@@ -51,7 +51,7 @@ export function FounderVoice({ onClose }: { onClose: () => void }) {
           accessibilityLabel="Esfera de Founder"
           accessibilityHint="Toca para interrumpir o reanudar la escucha. Mantén pulsado para cambiar la voz."
         >
-          <Orb phase={ORB_PHASE[t.phase]} muted={false} mic={t.levels.mic} out={t.levels.out} />
+          <FounderOrb phase={ORB_PHASE[t.phase]} mic={t.levels.mic} out={t.levels.out} />
         </Pressable>
 
         {status ? <AppText variant="small" color={MUTED} style={styles.status} accessibilityLiveRegion="polite">{status}</AppText> : null}
